@@ -1,0 +1,315 @@
+---
+title: "Prediction Assignment Writeup"
+author: "Suharkov MP"
+date: "25 11 2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+The goal of this project is to predict the manner in which people did the exercise. This is the "classe" variable in the training set. I will examine the data to choose the variables to predict with. This report is describing how I built the model, how I used cross validation, what the expected out of sample error is, and why I made these choices.
+
+## Background
+Using devices such as *Jawbone Up*, *Nike FuelBand*, and *Fitbit* it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how *much* of a particular activity they do, but they rarely quantify *how well they do it*. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: [http:/groupware.les.inf.puc-rio.br/har](http:/groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset).
+
+
+### Data source
+The training data for this project are available here:
+
+[https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+
+The test data are available here:
+
+[https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+
+
+## Libraries
+```{r libs, message = F, warning = F}
+library(dplyr) #transforming data
+library(ggplot2) #plotting
+library(ggcorrplot) #plotting correlation matrix
+library(caret) #machine learning
+library(rattle) #plotting trees
+```
+### Seed
+```{r seed, message = F, warning = F}
+set.seed(555)
+```
+
+## Get and clean the data
+I will leave the test file for validation and in this project take 15% of train data for test purposes.
+```{r data, message = F, warning = F}
+data <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv')
+inTrain <- createDataPartition(y = data$classe, p = 0.85, list = FALSE)
+training <- data[inTrain,]
+testing <- data[-inTrain,]
+validation <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv')
+```
+First look at the data:
+```{r dim, message = F, warning = F}
+dim(training)
+```
+### How many rows of each class are there?
+```{r prop, message = F, warning = F}
+proportions(table(training$classe))
+```
+All besides **A** are almost equal.
+
+```{r str, message = F, warning = F}
+str(training)
+```
+
+There are NA's and empty cells in the dataset. Fill empty with NA's for further processing:
+```{r na1, message = F, warning = F}
+training <- training %>% na_if("")
+```
+The amount of NA's in the train data can be estimated with this formula:
+```{r na2, message = F, warning = F}
+sum(is.na(training)) / (dim(training)[1] * dim(training)[2])
+```
+But this is a percentage of NA's in all the data. Estimate the amount of rows. Showing all 160 columns' NA's will take several pages, I will show first 20% of them.
+```{r na3, message = F, warning = F}
+sapply(training, function(x) sum(is.na(x)))[1:32]
+```
+The first column with NA is **max_roll_belt**. The total percentage of NA's is the amount of NA's in this column (7th in summary) divided by the total rows in the data (```dim[2]```)
+```{r na4, message = F, warning = F}
+summary(training$max_roll_belt)[7] / dim(training)[1]
+```
+So, I will delete all columns with 95% and more NA's:
+```{r filter, message = F, warning = F}
+training <- training %>% select(which(colMeans(is.na(.)) < 0.95))
+dim(training)
+```
+Looks nice, 60 variables are left out of 160. Now I get rid of variables with small variance and meaningless parameters like names, timestamps etc. First 7 columns are to be removed:
+```{r variance, message = F, warning = F}
+training <- training[,8:60]
+nearZeroVar(training)
+```
+So, this data seems to be ok for creating models. Now the same manipulations with test data (in one string of code):
+```{r test, message = F, warning = F}
+testing <- select(testing, colnames(training))
+validation <- select(validation, colnames(training)[1:52])
+```
+## Correlation matrix
+As I can see, each variable has at least one pair for which correlation module is close to 1, so no more columns should be removed.
+```{r corr, message = F, warning = F}
+p.mat <- abs(cor(training[,-53]))
+ggcorrplot(p.mat, sig.level=0.05, lab_size = 4.5, p.mat = NULL, type = 'upper',
+           insig = c('pch', 'blank'), pch = 1, pch.col = 'black', pch.cex = 1,
+           tl.cex = 8) +
+    theme(axis.text.x = element_text(margin = margin(-2, 0, 0, 0)),
+          axis.text.y = element_text(margin = margin(0, -2, 0, 0)))
+```
+## What PCA will show?
+```{r pca1, message = F, warning = F}
+prComp <- prcomp(training[,-53])
+summary(prComp)
+```
+First 10 principal components give us 96% of variance, after that it starts to increase less rapidly. What are these components?
+```{r pca2, message = F, warning = F}
+prComp$center[1:10]
+```
+I will use these 10 in further investigation, hope this would be enough.
+
+## Comparing models
+
+### Desicion tree with all columns
+```{r tree1, message = F, warning = F}
+tree1 <- train(classe ~ ., method = 'rpart', data = training)
+fancyRpartPlot(tree1$finalModel)
+```
+```{r newdata1, message = F, warning = F}
+# Predicting new values
+pred1 <- predict(tree1, newdata = testing)
+confMat1 <- confusionMatrix(table(pred1, testing$classe))
+confMat1
+```
+```{r confmat1, message = F, warning = F}
+# Plotting matrix
+plot(confMat1$table, col = confMat1$byClass,
+     main = paste("Decision tree with all variables - Accuracy =",
+                  round(confMat1$overall['Accuracy'], 4)))
+```
+
+### Desicion tree (10 PCA's)
+```{r tree2, message = F, warning = F}
+tree2 <- train(classe ~ roll_belt + 
+                pitch_belt +
+                yaw_belt +
+                total_accel_belt +
+                gyros_belt_x +
+                gyros_belt_y +
+                gyros_belt_z +
+                accel_belt_x +
+                accel_belt_y +
+                accel_belt_z, 
+              method = 'rpart', data = training)
+fancyRpartPlot(tree2$finalModel)
+```
+```{r newdata2, message = F, warning = F}
+# Predicting new values
+pred2 <- predict(tree2, newdata = testing)
+confMat2 <- confusionMatrix(table(pred2, testing$classe))
+confMat2
+```
+```{r confmat2, message = F, warning = F}
+# Plotting matrix
+plot(confMat2$table, col = confMat2$byClass,
+     main = paste("Decision tree with 10 PCA's - Accuracy =",
+                  round(confMat2$overall['Accuracy'], 4)))
+```
+
+### Desicion tree (15 PCA's)
+```{r tree3, message = F, warning = F}
+tree3 <- train(classe ~ roll_belt + 
+                pitch_belt +
+                yaw_belt +
+                total_accel_belt +
+                gyros_belt_x +
+                gyros_belt_y +
+                gyros_belt_z +
+                accel_belt_x +
+                accel_belt_y +
+                accel_belt_z +
+                magnet_belt_x +
+                magnet_belt_y +
+                magnet_belt_z +
+                roll_arm +
+                pitch_arm, 
+              method = 'rpart', data = training)
+fancyRpartPlot(tree3$finalModel)
+```
+```{r newdata3, message = F, warning = F}
+# Predicting new values
+pred3 <- predict(tree3, newdata = testing)
+confMat3 <- confusionMatrix(table(pred3, testing$classe))
+confMat3
+```
+```{r confmat3, message = F, warning = F}
+# Plotting matrix
+plot(confMat3$table, col = confMat3$byClass,
+     main = paste("Decision tree with 15 PCA's - Accuracy =",
+                  round(confMat3$overall['Accuracy'], 4)))
+```
+
+### Desicion tree (20 PCA's)
+```{r tree4, message = F, warning = F}
+tree4 <- train(classe ~ roll_belt + 
+                 pitch_belt +
+                 yaw_belt +
+                 total_accel_belt +
+                 gyros_belt_x +
+                 gyros_belt_y +
+                 gyros_belt_z +
+                 accel_belt_x +
+                 accel_belt_y +
+                 accel_belt_z +
+                 magnet_belt_x +
+                 magnet_belt_y +
+                 magnet_belt_z +
+                 roll_arm +
+                 pitch_arm +
+                 yaw_arm +
+                 total_accel_arm +
+                 gyros_arm_x +
+                 gyros_arm_y +
+                 gyros_arm_z, 
+              method = 'rpart', data = training)
+fancyRpartPlot(tree4$finalModel)
+```
+```{r newdata4, message = F, warning = F}
+# Predicting new values
+pred4 <- predict(tree4, newdata = testing)
+confMat4 <- confusionMatrix(table(pred4, testing$classe))
+confMat4
+```
+```{r confmat4, message = F, warning = F}
+# Plotting matrix
+plot(confMat4$table, col = confMat4$byClass,
+     main = paste("Decision tree with 20 PCA's - Accuracy =",
+                  round(confMat4$overall['Accuracy'], 4)))
+```
+
+### Generalized Boosted Model (GBM) with all columns
+```{r gbm1, message = F, warning = F, cache = TRUE}
+gbm1 <- train(classe ~ ., method = 'gbm', data = training, verbose = FALSE)
+print(gbm1)
+```
+```{r newdata5, message = F, warning = F}
+# Predicting new values
+predGbm1 <- predict(gbm1, testing)
+confMatGbm1 <- confusionMatrix(table(predGbm1, testing$classe))
+confMatGbm1
+```
+```{r confmat5, message = F, warning = F}
+# Plotting matrix
+plot(confMatGbm1$table, col = confMatGbm1$byClass,
+     main = paste("Generalized Boosted Model with all columns - Accuracy =",
+                  round(confMatGbm1$overall['Accuracy'], 4)))
+```
+
+### Generalized Boosted Model (GBM) with 20 PCA's
+```{r gbm2, message = F, warning = F, cache = TRUE}
+gbm2 <- train(classe ~ roll_belt + 
+                 pitch_belt +
+                 yaw_belt +
+                 total_accel_belt +
+                 gyros_belt_x +
+                 gyros_belt_y +
+                 gyros_belt_z +
+                 accel_belt_x +
+                 accel_belt_y +
+                 accel_belt_z +
+                 magnet_belt_x +
+                 magnet_belt_y +
+                 magnet_belt_z +
+                 roll_arm +
+                 pitch_arm +
+                 yaw_arm +
+                 total_accel_arm +
+                 gyros_arm_x +
+                 gyros_arm_y +
+                 gyros_arm_z,
+              method = 'gbm', data = training, verbose = FALSE)
+print(gbm2)
+```
+```{r newdata6, message = F, warning = F}
+# Predicting new values
+predGbm2 <- predict(gbm2, testing)
+confMatGbm2 <- confusionMatrix(table(predGbm2, testing$classe))
+confMatGbm2
+```
+```{r confmat6, message = F, warning = F}
+# Plotting matrix
+plot(confMatGbm2$table, col = confMatGbm2$byClass,
+     main = paste("Generalized Boosted Model with 20 PCA's - Accuracy =",
+                  round(confMatGbm2$overall['Accuracy'], 4)))
+```
+
+### Random forest
+```{r forest, message = F, warning = F, cache = TRUE}
+forest <- train(classe ~ ., method = 'rf', data = training)
+print(forest$finalModel)
+```
+```{r newdata7, message = F, warning = F}
+# Predicting new values
+predFor <- predict(forest, newdata = testing)
+confMatFor <- confusionMatrix(table(predFor, testing$classe))
+confMatFor
+```
+```{r confmat7, message = F, warning = F}
+# Plotting matrix
+plot(confMatFor$table, col = confMatFor$byClass,
+     main = paste("Random forest - Accuracy =",
+                  round(confMatFor$overall['Accuracy'], 4)))
+```
+
+## Choosing and applying model for validation set
+The best score was shown by Random forest, so this model will be used with accuracy = 99.39%.
+```{r predict, message = F, warning = F}
+predValidation <- predict(forest, newdata = validation)
+predValidation
+```
